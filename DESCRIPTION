@@ -1,0 +1,11 @@
+Package: SCOUT
+Type: Package
+Title: Score-Based Causal Outcome Learning Using Treatment Signals
+Version: 0.1.0
+Authors@R: person("Eric V.", "Strobl", email = "ericvonstrobl@gmail.com", role = c("aut", "cre"))
+Description: Implements SCOUT, a method for learning treatment-responsive composite outcomes from longitudinal multivariate measurements while adjusting for confounding represented by high-dimensional noisy baseline proxies. SCOUT constructs low-dimensional COMPACT adjustment scores, learns nonnegative outcome weights, and estimates average and conditional treatment effects. Includes ablations that evaluate the contributions of two-dimensional refinement and COMPACT-based adjustment.
+License: CC BY-NC 4.0
+Encoding: UTF-8
+LazyData: true
+Imports: stats, glmnet
+RoxygenNote: 7.3.2
