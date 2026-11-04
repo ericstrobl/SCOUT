@@ -7,5 +7,5 @@ Description: Implements SCOUT, a method for learning treatment-responsive compos
 License: CC BY-NC 4.0
 Encoding: UTF-8
 LazyData: true
-Imports: stats, glmnet
+Imports: stats, glmnet, parallel
 RoxygenNote: 7.3.2
