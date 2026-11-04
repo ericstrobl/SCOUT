@@ -1,6 +1,6 @@
 # SCOUT benchmark: 100 replications x 16 (n, p) settings.
 
-source("R/SCOUT.R")
+library(SCOUT)
 for (f in c("sim_data.R", "metrics.R", "SCOUT_no_2D.R", "SCOUT_no_COMPACT.R"))
   source(file.path("Experiments", f))
 
