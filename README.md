@@ -3,7 +3,7 @@
 
 SCOUT (Score-based Causal Outcome Learning Using Treatment Signals) is an algorithm for learning treatment-responsive composite outcomes while adjusting for confounding in observational biomedical data. SCOUT addresses settings with numerous candidate outcomes and high-dimensional, noisy baseline variables that serve as proxies for potentially unobserved confounders. The algorithm first constructs a common adjustment representation for learning nonnegative outcome weights across multiple longitudinal visits. After learning the composite outcome, SCOUT reduces the adjustment representation to at most two dimensions using COMPACT, enabling estimation of average treatment effects (ATEs) and conditional average treatment effects (CATEs) within the learned score space. SCOUT also provides conditional randomization tests (CRTs) for detecting average treatment effects and treatment-effect heterogeneity while accounting for adaptive outcome learning.
 
-All code was tested in R version 4.3.1.
+Code was tested in R version 4.3.1.
 
 # Installation
 
