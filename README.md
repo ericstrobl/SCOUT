@@ -31,7 +31,7 @@ T <- rbinom(n, 1, plogis(0.6*C[,1] - 0.4*C[,2]))
 Y_list <- lapply(seq_len(m), function(k) {
   Y <- sapply(seq_len(r), function(j) {
     0.4*C[,1] + 0.2*C[,2] +
-      T*(0.3 + 0.1*j + 0.2*C[,1])*k/m + rnorm(n)
+      T*(0.3 + 0.1*j + 1*C[,1])*k/m + rnorm(n)
   })
   colnames(Y) <- paste0("Y", seq_len(r))
   Y
