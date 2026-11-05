@@ -2,7 +2,7 @@
 # SCOUT CRT simulations: three conditions, three visits, mean ATE / mean Q
 source("sim_data.R"); source("randomization_dgp.R"); source("crt_scout_fast.R")
 M <- 500L; B <- 500L; n <- 1000L; p <- 200L
-DGP_SEED <- sample.int(.Machine$integer.max, 1L); VERSION <- 2L
+DGP_SEED <- sample.int(.Machine$integer.max, 1L); VERSION <- 1L
 CRT_CORES <- 4L; CRT_RESELECT_ETA <- TRUE
 LEVEL <- .05; MIN_VALID <- .90; PROP_CLIP <- 1e-6
 OUT <- sprintf("scout_CRT_M%d_B%d_n%d_p%d_seed%d_v%d", M, B, n, p, DGP_SEED, VERSION)
