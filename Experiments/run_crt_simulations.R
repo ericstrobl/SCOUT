@@ -1,185 +1,162 @@
 
-# run_crt_simulations.R
-# Monte Carlo evaluation of SCOUT's ATE and CATE CRTs.
-# Uses the functions in R/ and saves results after each replication.
-
-SRC_DIR <- "R"
-for (file in c("sim_data.R", "randomization_dgp.R",
-               "SCOUT.R", "SCOUT_CRT.R"))
-  source(file.path(SRC_DIR, file))
-
-# Simulation settings
-M <- 500L
-B <- 500L
-n <- 1000L
-p <- 200L
-DGP_SEED <- 12345L
-VERSION <- 25L
-CRT_CORES <- 4L
-CRT_RESELECT_ETA <- TRUE
-LEVEL <- 0.05
-
-OUT <- sprintf("scout_CRT_M%d_B%d_n%d_p%d_dgp%d_v%d",
-               M, B, n, p, DGP_SEED, VERSION)
+# SCOUT CRT simulations: three conditions, three visits, mean ATE / mean Q
+source("sim_data.R"); source("randomization_dgp.R"); source("crt_scout_fast.R")
+M <- 500L; B <- 500L; n <- 1000L; p <- 200L
+DGP_SEED <- sample.int(.Machine$integer.max, 1L); VERSION <- 2L
+CRT_CORES <- 4L; CRT_RESELECT_ETA <- TRUE
+LEVEL <- .05; MIN_VALID <- .90; PROP_CLIP <- 1e-6
+OUT <- sprintf("scout_CRT_M%d_B%d_n%d_p%d_seed%d_v%d", M, B, n, p, DGP_SEED, VERSION)
 dir.create(OUT, showWarnings = FALSE)
+cat("DGP seed:", DGP_SEED, "\n")
 
-config <- list(M=M, B=B, n=n, p=p, DGP_SEED=DGP_SEED,
-               VERSION=VERSION, CRT_RESELECT_ETA=CRT_RESELECT_ETA)
-config_file <- file.path(OUT, "config.rds")
-
-if (file.exists(config_file)) {
-  if (!identical(readRDS(config_file), config))
-    stop("Cached settings differ; change VERSION.")
-} else {
-  saveRDS(config, config_file)
+Q_stat <- function(z) sqrt(mean((z - mean(z))^4))
+p_upper <- function(x, z) (1 + sum(z >= x))/(length(z) + 1)
+extract_stats <- function(f) {
+  a <- vapply(f$final, `[[`, 0.0, "ATE")
+  C <- do.call(cbind, lapply(f$final, `[[`, "CATE"))
+  q <- apply(C, 2, Q_stat)
+  list(ATE = c(a, mean(a)), Q = c(q, mean(q)))
+}
+make_constant <- function(d, scales, delta) {
+  for (k in seq_along(d$Y_list))
+    d$Y_list[[k]] <- d$Y_list[[k]] + tcrossprod(d$T, scales[k] * delta)
+  d
 }
 
-# Constant outcome-specific effects sampled independently from U(-1,1).
-# Effects may vary across outcomes and visits, but not individuals.
-make_constant <- function(dat, seed) {
-  set.seed(seed)
-  out <- dat
-  nn <- nrow(dat$X)
-  r <- ncol(dat$Y_list[[1]])
-  delta <- runif(r, -1, 1)
-  
-  for (k in seq_along(out$Y_list)) {
-    dk <- dat$truth$visit_scale[k] * delta
-    out$Y_list[[k]] <- dat$Y_list[[k]] + tcrossprod(dat$T, dk)
-    out$truth$tau[[k]] <- matrix(rep(dk, each=nn), nn, r)
+crt_one <- function(b, s) {
+  set.seed(s$seed + 100000L * (s$K + 1L) + b)
+  ts <- rbinom(s$n, 1L, s$e)
+  empty <- list(ATE = rep(NA_real_, s$J), Q = rep(NA_real_, s$J))
+  if (min(tabulate(ts + 1L, nbins = 2L)) < 5L) return(empty)
+  one <- function(Y) tryCatch(crt_scout_multi(s$X, ts, list(Y), eta = s$eta,
+                                              seed = 1)[[1]], error = \(e) NULL)
+  stats <- function(f) if (is.null(f)) empty else
+    tryCatch(extract_stats(f), error = \(e) empty)
+  if (s$zero) return(stats(one(s$Y)))
+  Yh <- lapply(seq_len(s$K), \(k)
+    s$Y[[k]] + tcrossprod(ts - s$T, s$delta[k, ]))
+  pair <- tryCatch(crt_scout_multi(s$X, ts, list(s$Y, Yh), eta = s$eta,
+                                   seed = 1), error = \(e) NULL)
+  if (is.null(pair)) pair <- list(one(s$Y), one(Yh))
+  list(ATE = stats(pair[[1]])$ATE, Q = stats(pair[[2]])$Q)
+}
+crt_worker <- function(b) crt_one(b, .crt_state)
+
+run_condition <- function(d, seed, zero, cl) {
+  X <- as.matrix(d$X); T <- as.numeric(d$T)
+  Y <- lapply(d$Y_list, as.matrix); K <- length(Y); J <- K + 1L
+  visits <- c(paste0("visit", seq_len(K)), "mean_visit_Q")
+  fit <- crt_scout(X, T, Y, seed = 1, estimate_item_effects = !zero)
+  obs <- extract_stats(fit)
+  S <- do.call(cbind, lapply(fit$final, `[[`, "S"))
+  e <- glm.fit(cbind(1, S), T, family = binomial())$fitted.values
+  e <- pmin(pmax(e, PROP_CLIP), 1 - PROP_CLIP)
+  state <- list(X = X, T = T, Y = Y, e = e, n = nrow(X), K = K, J = J,
+                seed = seed, zero = zero, delta = fit$constant_item_effects,
+                eta = if (CRT_RESELECT_ETA) NULL else fit$eta)
+  if (is.null(cl)) {
+    draws <- lapply(seq_len(B), crt_one, s = state)
+  } else {
+    parallel::clusterCall(cl, function(s) {
+      assign(".crt_state", s, envir = .GlobalEnv); NULL
+    }, state)
+    draws <- parallel::parLapplyLB(cl, seq_len(B), crt_worker, chunk.size = 5L)
   }
-  
-  out$truth$effect <- "constant"
-  out
+  A <- do.call(rbind, lapply(draws, `[[`, "ATE"))
+  Q <- do.call(rbind, lapply(draws, `[[`, "Q"))
+  colnames(A) <- colnames(Q) <- visits
+  rows <- lapply(seq_len(J), \(j) {
+    a <- A[is.finite(A[, j]), j]; q <- Q[is.finite(Q[, j]), j]
+    if (min(length(a), length(q)) < MIN_VALID * B)
+      stop("Too few valid CRT draws for ", visits[j])
+    pa <- p_upper(obs$ATE[j], a); pq <- p_upper(obs$Q[j], q)
+    data.frame(visit = visits[j], ATE = obs$ATE[j], CATE_Q = obs$Q[j],
+               ATE_p_positive = pa, CATE_p_homogeneity = pq,
+               ATE_reject = pa <= LEVEL, CATE_reject = pq <= LEVEL)
+  })
+  list(results = do.call(rbind, rows),
+       raw = list(ATE_null = A, Q_homogeneity_null = Q))
 }
 
-# Fit SCOUT, then obtain unadjusted CRT p-values.
-run_condition <- function(dat, seed) {
-  fit <- SCOUT(dat$X, dat$T, dat$Y_list, seed=1L)
-  
-  crt <- SCOUT_CRT(
-    fit, dat$X, dat$T, dat$Y_list,
-    B=B, seed=seed, cores=CRT_CORES,
-    reselect_eta=CRT_RESELECT_ETA,
-    fit_seed=1L
-  )
-  
-  crt$results
+# Single persistent PSOCK cluster; share data once per condition.
+Sys.setenv(OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1",
+           MKL_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1")
+cl <- if (CRT_CORES > 1L) parallel::makeCluster(CRT_CORES) else NULL
+if (!is.null(cl)) {
+  parallel::clusterExport(cl, c("crt_scout_multi", "Q_stat", "extract_stats",
+                                "crt_one", "crt_worker"), envir = .GlobalEnv)
+  parallel::clusterEvalQ(cl, {
+    Sys.setenv(OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1",
+               MKL_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1")
+    if (requireNamespace("RhpcBLASctl", quietly = TRUE))
+      RhpcBLASctl::blas_set_num_threads(1L)
+    NULL
+  })
 }
 
-# Fixed DGP parameters; independent samples across replications.
 dgp <- make_dgp(DGP_SEED)
 saveRDS(dgp, file.path(OUT, "fixed_dgp.rds"))
-writeLines(capture.output(sessionInfo()),
-           file.path(OUT, "sessionInfo.txt"))
-
 all_results <- vector("list", M)
-
-for (sim in seq_len(M)) {
-  message("Replication ", sim, "/", M)
-  path <- file.path(OUT, sprintf("rep_%03d.rds", sim))
-  
-  if (file.exists(path)) {
-    z <- readRDS(path)
-  } else {
-    master <- sample_from_dgp(dgp, seed=10001L+sim, n_max=n)
-    d0 <- get_sim_data(master, n, p, "null")
-    d1 <- get_sim_data(master, n, p, "alternative")
-    
-    conditions <- list(
-      no_effect = d0,
-      constant_effect = make_constant(d0, 300001L+sim),
-      heterogeneous_effect = d1
-    )
-    
-    z <- do.call(rbind, lapply(names(conditions), function(effect) {
-      result <- run_condition(
-        conditions[[effect]],
-        200001L + (B + 1L)*sim
-      )
-      result$effect <- effect
-      result$sim <- sim
-      result
+tryCatch({
+  for (sim in seq_len(M)) {
+    message("Replication ", sim, "/", M)
+    path <- file.path(OUT, sprintf("rep_%03d.rds", sim))
+    if (file.exists(path)) {
+      obj <- readRDS(path)
+    } else {
+      master <- sample_from_dgp(dgp, seed = 10001L + sim, n_max = n)
+      d0 <- get_sim_data(master, n, p, "null")
+      d1 <- get_sim_data(master, n, p, "alternative")
+      set.seed(300001L + sim)
+      delta <- runif(ncol(d0$Y_list[[1L]]), -1, 1)
+      cases <- list(no_effect = d0,
+                    constant_effect = make_constant(d0, d1$truth$visit_scale, delta),
+                    heterogeneous_effect = d1)
+      seed <- 200001L + (B + 1L) * sim
+      obj <- lapply(names(cases), \(e)
+        run_condition(cases[[e]], seed, zero = (e == "no_effect"), cl = cl))
+      names(obj) <- names(cases)
+      saveRDS(obj, path)
+    }
+    all_results[[sim]] <- do.call(rbind, lapply(names(obj), \(e) {
+      z <- obj[[e]]$results; z$effect <- e; z$sim <- sim; z
     }))
-    
-    rownames(z) <- NULL
-    saveRDS(z, path)
+    if (sim %% 10L == 0L || sim == M)
+      write.csv(do.call(rbind, all_results[seq_len(sim)]),
+                file.path(OUT, "results_updated.csv"), row.names = FALSE)
   }
-  
-  all_results[[sim]] <- z
-  
-  if (sim %% 10L == 0L || sim == M)
-    write.csv(do.call(rbind, all_results[seq_len(sim)]),
-              file.path(OUT, "results.csv"), row.names=FALSE)
-}
-
+}, finally = { if (!is.null(cl)) parallel::stopCluster(cl) })
 results <- do.call(rbind, all_results)
-rownames(results) <- NULL
-saveRDS(results, file.path(OUT, "results.rds"))
-write.csv(results, file.path(OUT, "results.csv"), row.names=FALSE)
+saveRDS(results, file.path(OUT, "results_updated.rds"))
 
-# Rejection rates and exact binomial 95% confidence intervals.
-summarize_group <- function(d) {
-  do.call(rbind, lapply(c("ATE", "CATE"), function(test) {
-    reject <- d[[paste0(test, "_p")]] <= LEVEL
-    ci <- binom.test(sum(reject), length(reject))$conf.int
-    
-    data.frame(
-      effect=d$effect[1], visit=d$visit[1], test=test,
-      M_completed=nrow(d),
-      Rate=100*mean(reject),
-      Lower=100*ci[1], Upper=100*ci[2]
-    )
-  }))
+# Prism-ready calibration curves, Type I error, and power (exact 95% CIs).
+visits <- unique(results$visit); grid <- seq(.01, 1, .01)
+curve <- function(d, col) 100 * vapply(grid, \(a) mean(d[[col]] <= a), 0.0)
+for (v in visits) {
+  no <- subset(results, effect == "no_effect" & visit == v)
+  co <- subset(results, effect == "constant_effect" & visit == v)
+  panel <- data.frame(Nominal_Percent = 100 * grid,
+    ATE_ZeroEffect_Percent = curve(no, "ATE_p_positive"),
+    CATE_ConstantEffect_Percent = curve(co, "CATE_p_homogeneity"))
+  fname <- if (v == "mean_visit_Q") "Prism_Panel_A_Calibration_updated.csv" else
+    paste0("Prism_Panel_A_Calibration_", v, ".csv")
+  write.csv(panel, file.path(OUT, fname), row.names = FALSE)
 }
-
-summary_results <- do.call(rbind, lapply(
-  split(results, interaction(results$effect, results$visit)),
-  summarize_group
-))
-rownames(summary_results) <- NULL
-
-write.csv(summary_results, file.path(OUT, "summary.csv"),
-          row.names=FALSE)
-
-# Calibration curves for the two null hypotheses.
-grid <- seq(.01, 1, .01)
-
-get_p <- function(effect, column)
-  results[results$effect == effect &
-            results$visit == "mean_visit_Q", column]
-
-curve <- function(pvals)
-  100*vapply(grid, function(a) mean(pvals <= a), numeric(1))
-
-panelA <- data.frame(
-  Nominal_Percent=100*grid,
-  ATE_ZeroEffect_Percent=curve(get_p("no_effect", "ATE_p")),
-  CATE_ZeroEffect_Percent=curve(get_p("no_effect", "CATE_p")),
-  CATE_ConstantEffect_Percent=curve(get_p("constant_effect", "CATE_p"))
-)
-
-write.csv(panelA, file.path(OUT, "Prism_Panel_A_Calibration.csv"),
-          row.names=FALSE)
-
-# Type I error: ATE under zero effects; CATE under homogeneous effects.
-panelB <- subset(summary_results,
-                 (effect == "no_effect" & test == "ATE") |
-                   (effect %in% c("no_effect", "constant_effect") & test == "CATE")
-)
-
-# Power: ATE under nonzero effects; CATE under heterogeneous effects.
-panelC <- subset(summary_results,
-                 (effect %in% c("constant_effect", "heterogeneous_effect") &
-                    test == "ATE") |
-                   (effect == "heterogeneous_effect" & test == "CATE")
-)
-
-write.csv(panelB, file.path(OUT, "Prism_Panel_B_TypeI.csv"),
-          row.names=FALSE)
-write.csv(panelC, file.path(OUT, "Prism_Panel_C_Power.csv"),
-          row.names=FALSE)
-
-print(summary_results, row.names=FALSE)
-cat("\nComplete:", M, "replications,", B,
-    "randomizations per condition.\nOutput:", OUT, "\n")
+rate_ci <- function(x) c(mean(x), unname(binom.test(sum(x), length(x))$conf.int))
+spec <- function(e, v, col, name) data.frame(e, v, col, name)
+report <- function(s) do.call(rbind, lapply(seq_len(nrow(s)), \(i) {
+  d <- subset(results, effect == s$e[i] & visit == s$v[i])
+  z <- 100 * rate_ci(d[[s$col[i]]] <= LEVEL)
+  data.frame(Test = s$name[i], Rate = z[1], Lower = z[2], Upper = z[3],
+             Error_Minus = z[1] - z[2], Error_Plus = z[3] - z[1])
+}))
+TypeI <- do.call(rbind, lapply(visits, \(v) rbind(
+  spec("no_effect", v, "ATE_p_positive", paste("ATE null -", v)),
+  spec("constant_effect", v, "CATE_p_homogeneity", paste("CATE constant -", v)))))
+Power <- do.call(rbind, lapply(visits, \(v) rbind(
+  spec("constant_effect", v, "ATE_p_positive", paste("ATE constant -", v)),
+  spec("heterogeneous_effect", v, "ATE_p_positive", paste("ATE heterogeneous -", v)),
+  spec("heterogeneous_effect", v, "CATE_p_homogeneity", paste("CATE heterogeneous -", v)))))
+write.csv(report(TypeI), file.path(OUT, "Prism_Panel_B_TypeI_updated.csv"), row.names = FALSE)
+write.csv(report(Power), file.path(OUT, "Prism_Panel_C_Power_updated.csv"), row.names = FALSE)
+cat("Complete:", M, "replications x", B, "randomizations. Output:", OUT, "\n")
